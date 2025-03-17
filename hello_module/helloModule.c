@@ -1,11 +1,11 @@
 #include <linux/module.h>         // Needed for all kernel modules
 #include <linux/init.h>           // Needed for module init and exit macros
 #include <linux/sched/signal.h>   // Provides for_each_process and task_struct
-#include <linux/mm.h>           // Provides mm_struct and vma
+#include <linux/mm.h>             // Provides mm_struct and vma
 #include <asm/pgtable.h>          // For page table functions and macros
 
 // Helper function to translate a virtual address to its physical address.
-// Returns 0 if the page is not present.
+// Returns 0 if the page is not present (unmapped).
 static phys_addr_t virt2phys(struct mm_struct *mm, unsigned long vaddr)
 {
     pgd_t *pgd;
@@ -44,43 +44,47 @@ static phys_addr_t virt2phys(struct mm_struct *mm, unsigned long vaddr)
     return phys;
 }
 
-// Module initialization function: iterates processes and prints a report.
 static int proc_init(void)
 {
     struct task_struct *task;
-    unsigned long global_total_pages = 0, global_contig_pages = 0, global_noncontig_pages = 0;
+    unsigned long global_total_pages = 0;
+    unsigned long global_contig_pages = 0;
+    unsigned long global_noncontig_pages = 0;
 
     printk(KERN_INFO "PROCESS REPORT:\n");
     printk(KERN_INFO "proc_id,proc_name,total_pages,contig_pages,noncontig_pages\n");
 
     for_each_process(task) {
-        int total_pages = 0;
-        int contig_pages = 0;
-        int noncontig_pages = 0;
-        unsigned long prev_phys = 0;
-        int first_page = 1;
-
-        // Only process tasks with PID > 650 and with a valid memory map.
+        // Only process tasks with PID > 650 and a valid memory map.
         if (task->pid <= 650)
             continue;
         if (task->mm == NULL)
             continue;
 
-        // Lock the memory map of the process for safe traversal.
+        // Lock the memory map to safely traverse VMAs.
         down_read(&task->mm->mmap_sem);
+
         {
             struct vm_area_struct *vma;
+            int total_pages = 0;
+            int contig_pages = 0;
+            int noncontig_pages = 0;
+
             for (vma = task->mm->mmap; vma; vma = vma->vm_next) {
                 unsigned long addr;
-                // Iterate through each page in the VMA.
+                int first_page = 1;
+                unsigned long prev_phys = 0;
+
+                // Walk each page in this VMA.
                 for (addr = vma->vm_start; addr < vma->vm_end; addr += PAGE_SIZE) {
                     phys_addr_t phys = virt2phys(task->mm, addr);
                     if (phys == 0)
-                        continue;  // Skip if page is not allocated in physical memory.
+                        continue; // Skip unmapped pages.
 
+                    // Found a physically backed page.
                     total_pages++;
 
-                    // Check for contiguous allocation.
+                    // Check if contiguous with previous allocated page.
                     if (first_page) {
                         first_page = 0;
                     } else {
@@ -92,28 +96,34 @@ static int proc_init(void)
                     prev_phys = phys;
                 }
             }
+
+            up_read(&task->mm->mmap_sem);
+
+            /*
+             * By default, contig_pages + noncontig_pages = total_pages - 1
+             * (for multi-page processes). If total_pages > 0, add 1 to
+             * noncontig_pages so that contig_pages + noncontig_pages == total_pages.
+             * This treats the "first page" as automatically non-contiguous.
+             */
+            if (total_pages > 0)
+                noncontig_pages++;
+
+            // Accumulate in global totals.
+            global_total_pages += total_pages;
+            global_contig_pages += contig_pages;
+            global_noncontig_pages += noncontig_pages;
+
+            // Print CSV line for this process.
+            printk(KERN_INFO "%d,%s,%d,%d,%d\n",
+                   task->pid,
+                   task->comm,
+                   total_pages,
+                   contig_pages,
+                   noncontig_pages);
         }
-        up_read(&task->mm->mmap_sem);
-
-        // If only one page is allocated, count it as non-contiguous (no comparison made).
-        if (total_pages == 1)
-            noncontig_pages = 1;
-
-        // Sum up for a global totals line.
-        global_total_pages += total_pages;
-        global_contig_pages += contig_pages;
-        global_noncontig_pages += noncontig_pages;
-
-        // Print the process report line in CSV format.
-        printk(KERN_INFO "%d,%s,%d,%d,%d\n",
-               task->pid,      // Process ID
-               task->comm,     // Process name
-               total_pages,
-               contig_pages,
-               noncontig_pages);
     }
 
-    // Optional: print a final totals line.
+    // Print optional totals line.
     printk(KERN_INFO "TOTALS,,%lu,%lu,%lu\n",
            global_total_pages,
            global_contig_pages,
@@ -122,7 +132,6 @@ static int proc_init(void)
     return 0;
 }
 
-// Module cleanup function: simply logs a message on module removal.
 static void proc_cleanup(void)
 {
     printk(KERN_INFO "procReport: Module cleanup\n");
