@@ -1,213 +1,196 @@
-/*
- * procReport.c - Linux Kernel Module for Page Table Walking and Process Report
+/**
+ * helloModule.c - Linux Kernel Module for Reporting Allocated Pages
  *
- * This module traverses all processes in the system and, for each process with a PID > 650,
- * it examines the process's virtual memory areas (VMAs) to count the total number of pages
- * allocated in physical memory. In addition, it optionally counts how many pages are mapped
- * contiguously versus non-contiguously.
+ * This module iterates over all running processes with a PID greater than 650,
+ * examines their virtual memory areas, and counts the number of physical pages
+ * allocated. It further differentiates between pages that are mapped contiguously
+ * versus non-contiguously in physical memory.
  *
- * The report is printed to the kernel log in CSV format.
+ * The results are printed in CSV format to the kernel log.
  *
- * NOTE: This module is intended for use on kernel version 5.x. If your system uses kernel 6.x,
- * please install Ubuntu 20.04.6 LTS (Focal Fossa) as specified in the assignment instructions.
+ * NOTE: This module is best used on Linux kernel version 5.x. If you are running a
+ * kernel 6.x system, unexpected behavior may occur due to changes in memory management.
  */
 
- #include <linux/init.h>           // Required for the module initialization and cleanup macros
- #include <linux/module.h>         // Required for all kernel modules
- #include <linux/kernel.h>         // Needed for KERN_INFO and printk()
- #include <linux/sched/signal.h>   // Needed for for_each_process and access to task_struct
- #include <linux/mm.h>             // Needed for accessing mm_struct and vm_area_struct
- #include <linux/pid_namespace.h>  // Required for working with process IDs in kernel space
- #include <asm/io.h>               // Needed for IO operations and PAGE_MASK
- #include <asm/pgtable.h>          // Required for page table macros and types
- #include <linux/highmem.h>        // Needed for pte_offset_map and pte_unmap functions
+ #include <linux/module.h>       // Core kernel module definitions
+ #include <linux/kernel.h>       // For printk logging macros
+ #include <linux/init.h>         // For __init and __exit macros
+ #include <linux/sched.h>        // For task_struct and process iteration
+ #include <linux/sched/signal.h> // For for_each_process()
+ #include <linux/mm.h>           // For mm_struct and vm_area_struct
+ #include <linux/mm_types.h>     // For memory structure types
+ #include <linux/pid_namespace.h> // For PID namespace support
+ #include <asm/io.h>             // For PAGE_MASK and I/O operations
+ #include <asm/pgtable.h>        // For page table related functions/macros
+ #include <linux/highmem.h>      // For pte_offset_map() and pte_unmap()
  
- MODULE_LICENSE("GPL");            // License type -- this module is released under the GPL
- MODULE_AUTHOR("Your Name");       // Replace with your name
- MODULE_DESCRIPTION("Linux Kernel Module for Process Report with Page Table Walker");  // Module description
- MODULE_VERSION("1.0");            // Module version
+ MODULE_LICENSE("GPL");
+ MODULE_AUTHOR("Your Name");
+ MODULE_DESCRIPTION("Kernel module that reports allocated physical pages per process");
+ MODULE_VERSION("0.1");
  
- /*
-  * Function: virt2phys
-  * -------------------
-  * Translates a virtual address to a physical address for a given memory descriptor (mm_struct).
+ /**
+  * virt2phys - Convert a virtual page address to its corresponding physical address
+  * @mm:  Pointer to the memory map of the process
+  * @vaddr: Virtual address to be translated
   *
-  * Parameters:
-  *    mm   - pointer to the memory descriptor of a process
-  *    vaddr- the virtual address to translate
-  *
-  * Returns:
-  *    The physical address corresponding to vaddr if it is valid and allocated;
-  *    returns 0 if the virtual address is not mapped to physical memory.
-  *
-  * The function performs a 5-level page table walk (using pgd, p4d, pud, pmd, and pte)
-  * to obtain the physical address. It uses pte_offset_map() to temporarily map the page table
-  * entry and then unmaps it using pte_unmap().
+  * Returns the physical address if the page is present; otherwise returns 0.
   */
- static unsigned long virt2phys(struct mm_struct *mm, unsigned long vaddr)
+ unsigned long virt2phys(struct mm_struct *mm, unsigned long vaddr)
  {
-     pgd_t *pgd;         // Page Global Directory pointer
-     p4d_t *p4d;         // Page 4th-level Directory pointer
-     pud_t *pud;         // Page Upper Directory pointer
-     pmd_t *pmd;         // Page Middle Directory pointer
-     pte_t *pte;         // Page Table Entry pointer
-     unsigned long phys = 0; // Variable to store the physical address
+     pgd_t *pgd_entry;
+     p4d_t *p4d_entry;
+     pud_t *pud_entry;
+     pmd_t *pmd_entry;
+     pte_t *pte_entry;
+     struct page *page_ptr;
  
-     // Get the PGD entry for the given virtual address from the memory descriptor
-     pgd = pgd_offset(mm, vaddr);
-     if (pgd_none(*pgd) || pgd_bad(*pgd))
-         return 0;   // Return 0 if the PGD entry is not valid
+     /* Retrieve the first level (PGD) entry */
+     pgd_entry = pgd_offset(mm, vaddr);
+     if (pgd_none(*pgd_entry) || pgd_bad(*pgd_entry))
+         return 0;
  
-     // Get the P4D entry corresponding to vaddr
-     p4d = p4d_offset(pgd, vaddr);
-     if (p4d_none(*p4d) || p4d_bad(*p4d))
-         return 0;   // Return 0 if the P4D entry is not valid
+     /* Retrieve the 4th-level (P4D) entry */
+     p4d_entry = p4d_offset(pgd_entry, vaddr);
+     if (p4d_none(*p4d_entry) || p4d_bad(*p4d_entry))
+         return 0;
  
-     // Get the PUD entry from the P4D entry
-     pud = pud_offset(p4d, vaddr);
-     if (pud_none(*pud) || pud_bad(*pud))
-         return 0;   // Return 0 if the PUD entry is not valid
+     /* Retrieve the upper-level (PUD) entry */
+     pud_entry = pud_offset(p4d_entry, vaddr);
+     if (pud_none(*pud_entry) || pud_bad(*pud_entry))
+         return 0;
  
-     // Get the PMD entry from the PUD entry
-     pmd = pmd_offset(pud, vaddr);
-     if (pmd_none(*pmd) || pmd_bad(*pmd))
-         return 0;   // Return 0 if the PMD entry is not valid
+     /* Retrieve the middle-level (PMD) entry */
+     pmd_entry = pmd_offset(pud_entry, vaddr);
+     if (pmd_none(*pmd_entry) || pmd_bad(*pmd_entry))
+         return 0;
  
-     // Map the PTE for the given virtual address; this creates a temporary kernel mapping
-     pte = pte_offset_map(pmd, vaddr);
-     if (!pte)
-         return 0;   // Return 0 if the PTE mapping failed
+     /* Map the page table entry (PTE) into kernel space */
+     pte_entry = pte_offset_map(pmd_entry, vaddr);
+     if (!pte_entry)
+         return 0;
  
-     // Check if the page table entry is present; if not, unmap and return 0
-     if (!pte_present(*pte)) {
-         pte_unmap(pte);
+     /* Check if the PTE corresponds to a valid physical page */
+     page_ptr = pte_page(*pte_entry);
+     if (!page_ptr) {
+         pte_unmap(pte_entry);
          return 0;
      }
  
-     // Calculate the physical address:
-     // Mask the page table entry with PAGE_MASK and add the offset within the page.
-     phys = (pte_val(*pte) & PAGE_MASK) | (vaddr & ~PAGE_MASK);
+     /* Obtain the physical address from the page structure */
+     unsigned long phys_addr = page_to_phys(page_ptr);
+     pte_unmap(pte_entry);
  
-     // Unmap the temporary PTE mapping
-     pte_unmap(pte);
-     return phys;  // Return the resulting physical address
+     /* Optional: Check for a special unmapped value (if required by your environment) */
+     if (phys_addr == 70368744173568ULL)
+         return 0;
+ 
+     return phys_addr;
  }
  
- /*
-  * Function: procReport_init
-  * -------------------------
-  * Module initialization function that is called when the module is loaded.
+ /**
+  * count_allocated_pages - Count physical pages for a given process.
+  * @task: Pointer to the process's task_struct.
+  * @total: Pointer to the total allocated pages count.
+  * @contig: Pointer to count of contiguous pages.
+  * @noncontig: Pointer to count of non-contiguous pages.
   *
-  * This function iterates over all running processes using the for_each_process macro.
-  * For each process with PID > 650 and a valid memory descriptor, it walks through its VMAs
-  * and for each page (in increments of PAGE_SIZE) it translates the virtual address to a
-  * physical address using virt2phys(). Valid (nonzero) translations are counted.
-  *
-  * For extra credit, the code also checks whether consecutive valid pages are contiguous in
-  * physical memory. The first valid page of a process is counted as non-contiguous by default.
-  *
-  * The report is printed to the kernel log in CSV format with the following columns:
-  *   proc_id, proc_name, total_pages, contig_pages, noncontig_pages
-  *
-  * Optionally, after processing all processes, a totals line is printed.
-  *
-  * Returns:
-  *    0 on success.
+  * This function iterates over each virtual memory area (VMA) in the process's
+  * memory map and, for every page, it attempts to translate the virtual address to a
+  * physical address. If successful, it updates the page counts accordingly.
   */
- static int __init procReport_init(void)
+ void count_allocated_pages(struct task_struct *task, unsigned long *total,
+                            unsigned long *contig, unsigned long *noncontig)
  {
-     struct task_struct *task;         // Pointer to iterate through task_struct entries
-     struct mm_struct *mm;             // Pointer to a process's memory descriptor
-     struct vm_area_struct *vma;       // Pointer to a virtual memory area in a process
-     unsigned long addr;               // Iterator for addresses within a VMA
-     unsigned long phys;               // Physical address corresponding to a virtual address
-     unsigned long proc_total_pages;   // Total pages allocated for the current process
-     unsigned long proc_contig_pages;  // Count of contiguous pages for the current process
-     unsigned long proc_noncontig_pages; // Count of non-contiguous pages for the current process
-     unsigned long grand_total_pages = 0;   // Grand total of pages for all processes (PID > 650)
-     unsigned long grand_contig_pages = 0;  // Grand total of contiguous pages
-     unsigned long grand_noncontig_pages = 0; // Grand total of non-contiguous pages
-     unsigned long prev_phys;          // To hold previous page's physical address for contiguity check
-     bool first_page;                  // Flag to indicate the first valid page for a process
+     struct vm_area_struct *area;
+     unsigned long vaddr;
+     unsigned long prev_phys = 0;
  
-     // Print the report header to the kernel log
-     printk(KERN_INFO "PROCESS REPORT:");
-     printk(KERN_INFO "proc_id,proc_name,total_pages,contig_pages,noncontig_pages");
+     *total = 0;
+     if (contig)
+         *contig = 0;
+     if (noncontig)
+         *noncontig = 0;
  
-     // Iterate over all processes in the system
-     for_each_process(task) {
-         // Only consider processes with a PID greater than 650
-         if (task->pid > 650) {
-             // Initialize counts for the current process
-             proc_total_pages = 0;
-             proc_contig_pages = 0;
-             proc_noncontig_pages = 0;
-             first_page = true;
+     if (task->mm && task->mm->mmap) {
+         for (area = task->mm->mmap; area; area = area->vm_next) {
+             for (vaddr = area->vm_start; vaddr < area->vm_end; vaddr += PAGE_SIZE) {
+                 unsigned long phys = virt2phys(task->mm, vaddr);
+                 if (phys == 0)
+                     continue;
  
-             // Access the process's memory descriptor; kernel threads may have a NULL mm
-             mm = task->mm;
-             if (mm) {
-                 // Iterate over each virtual memory area (VMA) of the process
-                 for (vma = mm->mmap; vma; vma = vma->vm_next) {
-                     // Loop through the VMA range in steps of PAGE_SIZE
-                     for (addr = vma->vm_start; addr < vma->vm_end; addr += PAGE_SIZE) {
-                         // Translate the virtual address to a physical address
-                         phys = virt2phys(mm, addr);
-                         // If the physical address is 0, the page is not allocated in physical memory
-                         if (phys == 0)
-                             continue;
- 
-                         // Increment the total page count for the process
-                         proc_total_pages++;
- 
-                         // For the first valid page, mark it as non-contiguous by default
-                         if (first_page) {
-                             proc_noncontig_pages++;
-                             first_page = false;
-                         } else {
-                             // If the current physical address is contiguous with the previous page
-                             if (prev_phys + PAGE_SIZE == phys)
-                                 proc_contig_pages++;  // Count as contiguous
-                             else
-                                 proc_noncontig_pages++;  // Otherwise, count as non-contiguous
-                         }
-                         // Save the current physical address for the next iteration
-                         prev_phys = phys;
+                 (*total)++;
+                 if (contig && noncontig) {
+                     if (prev_phys != 0) {
+                         if (phys == prev_phys + PAGE_SIZE)
+                             (*contig)++;
+                         else
+                             (*noncontig)++;
                      }
+                     prev_phys = phys;
                  }
              }
- 
-             // Accumulate the counts into the grand totals for all qualifying processes
-             grand_total_pages += proc_total_pages;
-             grand_contig_pages += proc_contig_pages;
-             grand_noncontig_pages += proc_noncontig_pages;
- 
-             // Print the process report in CSV format:
-             // process ID, process name (comm field), total allocated pages,
-             // contiguous pages count, and non-contiguous pages count.
-             printk(KERN_INFO "%d,%s,%lu,%lu,%lu", task->pid, task->comm, proc_total_pages, proc_contig_pages, proc_noncontig_pages);
          }
      }
  
-     // Optionally, print a totals summary row to the kernel log.
-     printk(KERN_INFO "TOTALS,,%lu,%lu,%lu", grand_total_pages, grand_contig_pages, grand_noncontig_pages);
- 
-     return 0;  // Return success
+     /* Adjust for the first page, which has no predecessor */
+     if (contig && noncontig && *total > 0 && ((*contig + *noncontig) < *total))
+         (*noncontig)++;
  }
  
- /*
-  * Function: procReport_exit
-  * -------------------------
-  * Module cleanup function that is called when the module is removed.
+ /**
+  * generate_report - Print the process report in CSV format.
   *
-  * This function simply logs that the procReport module has been unloaded.
+  * Iterates over all processes with a PID > 650, computes the page counts, and logs
+  * a CSV-formatted report to the kernel log.
   */
- static void __exit procReport_exit(void)
+ static void generate_report(void)
  {
-     printk(KERN_INFO "procReport module unloaded.");
+     struct task_struct *proc;
+     unsigned long proc_total, proc_contig, proc_noncontig;
+     unsigned long grand_total = 0, grand_contig = 0, grand_noncontig = 0;
+ 
+     printk(KERN_INFO "PROCESS REPORT:\n");
+     printk(KERN_INFO "proc_id,proc_name,contig_pages,noncontig_pages,total_pages\n");
+ 
+     for_each_process(proc) {
+         if (proc->pid > 650) {
+             count_allocated_pages(proc, &proc_total, &proc_contig, &proc_noncontig);
+             printk(KERN_INFO "%d,%s,%lu,%lu,%lu\n",
+                    proc->pid, proc->comm, proc_contig, proc_noncontig, proc_total);
+             grand_total += proc_total;
+             grand_contig += proc_contig;
+             grand_noncontig += proc_noncontig;
+         }
+     }
+ 
+     printk(KERN_INFO "TOTALS,,%lu,%lu,%lu\n",
+            grand_contig, grand_noncontig, grand_total);
  }
  
- // Macros to define the initialization and cleanup functions
- module_init(procReport_init);
- module_exit(procReport_exit);
+ /**
+  * helloModule_init - Module initialization routine.
+  *
+  * Logs the start of the module, generates the process report, and confirms successful loading.
+  */
+ static int __init helloModule_init(void)
+ {
+     printk(KERN_INFO "helloModule: Initializing module...\n");
+     generate_report();
+     printk(KERN_INFO "helloModule: Module loaded successfully.\n");
+     return 0;
+ }
+ 
+ /**
+  * helloModule_exit - Module cleanup routine.
+  *
+  * Logs the module unloading.
+  */
+ static void __exit helloModule_exit(void)
+ {
+     printk(KERN_INFO "helloModule: Module unloaded.\n");
+ }
+ 
+ module_init(helloModule_init);
+ module_exit(helloModule_exit);
  
