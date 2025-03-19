@@ -27,8 +27,7 @@
 #include <asm/pgtable.h>        // For page table related functions/macros
 #include <linux/highmem.h>      // For pte_offset_map() and pte_unmap()
 
-MODULE_LICENSE("GPL");          // License type
-MODULE_AUTHOR("Your Name");     // Author name
+MODULE_AUTHOR("Dalton Mlitimore");     // Author name
 MODULE_DESCRIPTION("Kernel module that reports allocated physical pages per process");
 MODULE_VERSION("0.1");          // Version of the module
 
